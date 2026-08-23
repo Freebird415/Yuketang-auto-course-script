@@ -1,0 +1,13 @@
+# 依赖与生成物
+node_modules/
+coverage/
+__pycache__/
+*.pyc
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 本地环境变量（凭证）
+.env
