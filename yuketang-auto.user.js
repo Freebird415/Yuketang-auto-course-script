@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂连播助手
 // @namespace    https://greasyfork.org/users/1616996-acac1a
-// @version      2.0
+// @version      2.0.1
 // @description  雨课堂自动静音二倍速刷课：进入视频页点「开始刷课」后自动播放、静音、2 倍速、自动连播，播完自动跳下一个未完成视频。适配 2026 新版「学习空间」（/ai-workspace/lms-graph），兼容旧版 /pro/lms 与长江雨课堂。内嵌 always-on-focus 可后台挂机，支持一键 BUG 上报。
 // @author       Acac1a
 // @match        *://*.yuketang.cn/*
@@ -15,7 +15,7 @@
 (() => {
   'use strict';
 
-  const SCRIPT_VERSION = '2.0';
+  const SCRIPT_VERSION = '2.0.1';
   const IS_YUKETANG = /(^|\.)yuketang\.cn$/.test(location.hostname);
 
   // ===================================================================
@@ -187,7 +187,6 @@
   }
 
   const IS_VIDEO_PAGE = IS_YUKETANG && parsePageType(location.pathname) === 'video';
-  const IS_COURSE_PAGE = IS_YUKETANG && parsePageType(location.pathname) === 'course';
 
   log('脚本加载', 'INFO', `v${SCRIPT_VERSION} | ${location.pathname}`);
 
@@ -384,7 +383,8 @@
   // ===================================================================
   function createPanel() {
     if (!IS_YUKETANG) return;
-    if (!IS_VIDEO_PAGE && !IS_COURSE_PAGE) return;
+    // 只在视频播放页显示面板；课程目录页（/pro/lms/.../unfinished 等）不显示
+    if (!IS_VIDEO_PAGE) return;
     if (document.getElementById('ykt-panel')) return;
     const mount = document.body || document.documentElement;
     if (!mount) { setTimeout(createPanel, 500); return; }
@@ -830,24 +830,7 @@
       panelLog(`开始会话: ${pt}`);
       updatePanelStatus('运行中', '#52c41a');
 
-      if (pt === 'course') {
-        const ctx = parsePageContext(location.pathname);
-        try {
-          const plan = await planNextTask(ctx);
-          if (plan.next) {
-            panelLog(`从课程页跳转到第一个未完成视频（共 ${plan.total.video} 个）`);
-            gotoUrl(buildVideoUrl(ctx, plan.next.leafId));
-            return;
-          }
-          await finishAll();
-        } catch (e) {
-          panelLog('❌ 读取未完成清单失败: ' + e.message);
-          updatePanelStatus('读取失败', '#ff4d4f');
-        }
-        return;
-      }
-
-      if (pt !== 'video') { panelLog('⚠ 请在课程页或视频页使用'); return; }
+      if (pt !== 'video') { panelLog('⚠ 请在视频播放页使用'); return; }
 
       let guard = 0;
       while (guard++ < 500) {
@@ -872,10 +855,15 @@
     lastUrl = location.href;
     const pt = parsePageType(location.pathname);
     panelLog(`页面切换: ${pt}`);
-    if (!document.getElementById('ykt-panel')) initPanel();
+    const panel = document.getElementById('ykt-panel');
     if (pt === 'video') {
+      if (!panel) initPanel();
+      else panel.style.display = 'flex';
       updatePanelStatus(window._yktEngineActive ? '运行中' : '视频页', window._yktEngineActive ? '#52c41a' : '#1677ff');
       if (isEngineActive()) setTimeout(startSession, 800);
+    } else if (panel) {
+      // 站点内切到非视频节点（讨论 / 作业等）时收起面板
+      panel.style.display = 'none';
     }
   }).observe(document, { subtree: true, childList: true });
 

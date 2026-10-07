@@ -46,11 +46,14 @@ v2.0 是针对新版的重写：
    [Edge 商店](https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepiloendndfphd)）
 2. 打开本仓库的 [yuketang-auto.user.js](yuketang-auto.user.js)，点击右上角「Raw」，
    Tampermonkey 会弹出安装页，点「安装」
-3. 打开雨课堂视频页，右下角出现面板即安装成功
+3. 打开雨课堂的**视频播放页**，右下角出现面板即安装成功
+
+> 面板只在视频播放页（`/ai-workspace/lms-graph/{classroomId}/video/{leafId}` 等）出现，
+> 课程目录页、未完成列表页不显示。
 
 ## 使用
 
-1. 打开课程，进入视频页，或课程的「未完成」列表页
+1. 打开课程中的任意视频播放页
 2. 点击面板上的「开始刷课」
 3. 保持页面打开即可。脚本会自动播完一个跳下一个，全部完成后自动停止并复位按钮
 
