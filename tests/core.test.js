@@ -443,6 +443,67 @@ describe('RATE_LADDER / shouldDropRate()', () => {
   });
 });
 
+// ==================== 幽灵超前（从头播放）守护 ====================
+describe('shouldRewindSeek()', () => {
+  const base = { target: 70, guardActive: true, playedFromStart: false, hits: 0 };
+
+  it('未从头播过 + 大幅向前跳 → 拉回开头（唯一的命中场景）', () => {
+    expect(pure.shouldRewindSeek(base)).toBe(true);
+    expect(pure.shouldRewindSeek({ ...base, target: 10.1 })).toBe(true);
+  });
+
+  // —— 以下均为「必须不受影响」的正常场景 ——
+  it('已经开始从头播过 → 一律不拦（切段/拖动都在此之后）', () => {
+    expect(pure.shouldRewindSeek({ ...base, playedFromStart: true })).toBe(false);
+    expect(pure.shouldRewindSeek({ ...base, playedFromStart: true, target: 500 })).toBe(false);
+  });
+
+  it('守护未开启 → 不干预', () => {
+    expect(pure.shouldRewindSeek({ ...base, guardActive: false })).toBe(false);
+  });
+
+  it('小幅前进（影片内部步进/小 seek）→ 不拦', () => {
+    expect(pure.shouldRewindSeek({ ...base, target: 0 })).toBe(false);
+    expect(pure.shouldRewindSeek({ ...base, target: 5 })).toBe(false);
+    expect(pure.shouldRewindSeek({ ...base, target: 10 })).toBe(false);
+  });
+
+  it('累计拦满 3 次后放手，不无限对拉', () => {
+    expect(pure.shouldRewindSeek({ ...base, hits: 2 })).toBe(true);
+    expect(pure.shouldRewindSeek({ ...base, hits: 3 })).toBe(false);
+    expect(pure.shouldRewindSeek({ ...base, hits: 99 })).toBe(false);
+  });
+
+  it('不依赖瞬时 currentTime（参数里根本没有它，不会因 seek 中间态误判）', () => {
+    expect(pure.shouldRewindSeek({ target: 120, guardActive: true, playedFromStart: true, hits: 0 })).toBe(false);
+  });
+});
+
+describe('isGhostAdvance()', () => {
+  it('位置远超「从开头播到现在的预期」→ 判为幽灵续播', () => {
+    expect(pure.isGhostAdvance({ currentTime: 70, elapsedSec: 2, rate: 3 })).toBe(true);
+  });
+
+  it('正常 3x 播放不误判', () => {
+    expect(pure.isGhostAdvance({ currentTime: 6, elapsedSec: 2, rate: 3 })).toBe(false);
+    expect(pure.isGhostAdvance({ currentTime: 9, elapsedSec: 3, rate: 3 })).toBe(false);
+  });
+
+  it('容差 10s 以内不误判', () => {
+    expect(pure.isGhostAdvance({ currentTime: 15.9, elapsedSec: 2, rate: 3 })).toBe(false);
+    expect(pure.isGhostAdvance({ currentTime: 16.1, elapsedSec: 2, rate: 3 })).toBe(true);
+  });
+
+  it('暂停/未开播（elapsed=0）时不误判短位置', () => {
+    expect(pure.isGhostAdvance({ currentTime: 5, elapsedSec: 0, rate: 3 })).toBe(false);
+  });
+
+  it('非法入参不抛错且不动作', () => {
+    expect(pure.isGhostAdvance({ currentTime: 100, elapsedSec: -1, rate: 3 })).toBe(false);
+    expect(pure.isGhostAdvance({ currentTime: 100, elapsedSec: 5, rate: 0 })).toBe(false);
+  });
+});
+
 // ==================== 上下文与真实 URL 回归 ====================
 describe('真实 URL 回归', () => {
   const cases = [

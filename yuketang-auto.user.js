@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂连播助手
 // @namespace    https://greasyfork.org/users/1616996-acac1a
-// @version      2.1.0
+// @version      2.2.0
 // @description  雨课堂自动静音二倍速刷课：进入视频页点「开始刷课」后自动播放、静音、2 倍速、自动连播，播完自动跳下一个未完成视频。适配 2026 新版「学习空间」（/ai-workspace/lms-graph），兼容旧版 /pro/lms 与长江雨课堂。内嵌 always-on-focus 可后台挂机，支持一键 BUG 上报。
 // @author       Acac1a
 // @match        *://*.yuketang.cn/*
@@ -15,7 +15,7 @@
 (() => {
   'use strict';
 
-  const SCRIPT_VERSION = '2.1.0';
+  const SCRIPT_VERSION = '2.2.0';
   const IS_YUKETANG = /(^|\.)yuketang\.cn$/.test(location.hostname);
 
   // ===================================================================
@@ -76,6 +76,35 @@
     return measuredSpeed < target * 0.75 && strikes >= maxStrikes;
   }
 
+  /**
+   * 是否应该把这次 seek 拉回开头（纯函数，便于单测）。
+   *
+   * 不能用「瞬时 currentTime」判断人是否还在开头——seek 过程中 currentTime
+   * 会瞬时读到 0，会把正常的切段/拖动 seek 误判成幽灵续播。
+   * 改用明确的状态位 playedFromStart：
+   *   只有「本次会话还未从头播到过 5s」且「目标向前跳 ≥ 10s」时才拦。
+   *
+   * 于是：
+   *   - 正常从头播放：一旦过了 5s，playedFromStart 置位 → 之后一律不拦
+   *   - 分片切段 / 用户拖进度条：都发生在播放中后期 → 不受影响
+   *   - 幽灵续播：从头播都没播过，却被要跳到 70% → 命中
+   */
+  function shouldRewindSeek({ target, guardActive, playedFromStart, hits, maxHits = 3 }) {
+    if (!guardActive) return false;
+    if (playedFromStart) return false;
+    if (hits >= maxHits) return false;
+    return target > 10;
+  }
+
+  /**
+   * 位置是否明显超前于「从开头正常播放应该到的地方」（纯函数）。
+   * 用于兵底捕获「守护装上之前就已经续播完」的情况。
+   */
+  function isGhostAdvance({ currentTime, elapsedSec, rate, tolerance = 10 }) {
+    if (!(elapsedSec >= 0) || !(rate > 0)) return false;
+    return currentTime > elapsedSec * rate + tolerance;
+  }
+
   // ===================================================================
   //  模块 1：条件性原型链拦截（仅在引擎激活时生效）
   //  任何后来创建的 <video> 都会被自动施加目标倍速 / 静音 / 防暂停
@@ -113,6 +142,37 @@
         if (document.hidden) return;
         this.play().catch(() => {});
       };
+
+      // 「幽灵超前」守护：
+      //   播放器会根据服务端 last_point 自动续播。若 last_point 已经跑在
+      //   真正计分的 watch_length 前面（丢包/卡顿导致），续播就只剩下一小段
+      //   增量空间可以补分，造成「进度条 100% 却只记到 75%」的永久卡死。
+      //   服务端是按相邻两次上报的 cp 差值计分，所以从头完整播一遍就能把总量补满。
+      //   这里只在「人还在开头、却被大幅向前跳」时把 seek 拉回 0——
+      //   即播放器按服务端 last_point 续播的特征。正常从头播放、切片切段、
+      //   用户向后拖进度条都不会命中（详见 shouldRewindSeek 注释）。
+      window._yktStartGuard = false;
+      window._yktPlayedFromStart = false;
+      const ctDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+      if (ctDesc?.set) {
+        const origCt = ctDesc.set;
+        ctDesc.set = function (val) {
+          if (window._yktEngineActive && !this._scriptAllowSeek) {
+            const hits = this._yktGuardHit || 0;
+            if (shouldRewindSeek({
+              target: val,
+              guardActive: window._yktStartGuard,
+              playedFromStart: window._yktPlayedFromStart,
+              hits,
+            })) {
+              this._yktGuardHit = hits + 1;
+              return origCt.call(this, 0);
+            }
+          }
+          return origCt.call(this, val);
+        };
+        Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', ctDesc);
+      }
     } catch (e) { console.error('[雨课堂] 原型链失败:', e); }
   })();
 
@@ -554,25 +614,87 @@
   let healthTimer = null;
   let stopRequested = false;
 
-  function findVideo(timeoutSec = 30) {
+  /**
+   * 等待可播放的 <video>。
+   *
+   * 必须区分两种情况，不能一律超时跳过（这是「新章节第一个视频被跳过」的根因）：
+   *   - 页面上根本没有 video 元素 → 快速失败，很可能是讨论/作业页
+   *   - 有 video 但 metadata 迟迟不到 → 继续等。进入新章节时页面要多加载一份章节目录，
+   *     播放器初始化明显更慢；此时若按超时跳过，就会把新章节第一个视频整个丢掉
+   *     （同章节的后续视频因为数据已缓存，反而正常，所以症状只出现在章节首个视频上）。
+   *
+   * @returns {Promise<{video: HTMLVideoElement|null, sawElement: boolean}>}
+   */
+  function findVideo(opts) {
+    const { noElementSec = 20, totalSec = 150 } = opts || {};
     return new Promise((resolve) => {
       let n = 0;
-      const total = Math.ceil(timeoutSec);
+      let sawElement = false;
       const t = setInterval(() => {
         n++;
         const v = document.querySelector('video');
-        if (v && v.duration > 0) { clearInterval(t); video = v; resolve(v); return; }
-        if (n >= total) { clearInterval(t); resolve(null); }
+        if (v) {
+          sawElement = true;
+          if (v.duration > 0) { clearInterval(t); video = v; resolve({ video: v, sawElement: true }); return; }
+          // 有元素但还没就绪：定期踢一下播放器（新章节首帧常见）
+          if (n % 5 === 0) {
+            const bb = document.querySelector('xt-bigbutton');
+            if (bb && bb.offsetHeight > 0) { try { bb.click(); } catch (_) {} }
+            v.play().catch(() => {});
+          }
+        } else if (n >= noElementSec) {
+          clearInterval(t); resolve({ video: null, sawElement: false }); return;
+        }
+        if (n >= totalSec) { clearInterval(t); resolve({ video: null, sawElement }); }
       }, 1000);
     });
   }
 
-  /** 施加 2x + 静音 + 播放。注意：必须显式赋值，因为播放器在我们钩子之前就已初始化过一次 */
+  /**
+   * 施加目标倍速 + 静音 + 播放。
+   *
+   * 另外处理「幽灵续播」：播放器会按服务端 last_point 自动续播。若 last_point 已经
+   * 跑在真正计分的 watch_length 前面（丢包/卡顿引起），续播就只剩一小段增量空间，
+   * 造成「进度条 100% 却只记到 75%」的永久卡死。服务端按相邻两次上报的 cp 差值计分，
+   * 所以从头完整播一遍就能把总量补满。
+   *
+   * 两个手段都只在异常时动作，正常从头播放时一次都不会触发：
+   *   1. 入场时若已经在中途（> 3s）→ 拉回开头
+   *   2. 启动后 10s 内轮询，位置若明显超前于「应该到的地方」→ 拉回开头（最多 3 次）
+   */
   function engagePlayback(v) {
     const el = v || video || document.querySelector('video');
     if (!el) return;
     video = el;
     el._scriptAllowPause = false;
+    el._yktGuardHit = 0;
+
+    window._yktStartGuard = true;
+    window._yktPlayedFromStart = false;
+    const startTs = Date.now();
+    if (el.currentTime > 3) {
+      panelLog(`↺ 入场时已在 ${Math.round(el.currentTime)}s，拉回开头重播（避免进度条超前于计分）`);
+      try { el.currentTime = 0; } catch (_) {}
+    }
+
+    // 兵底：捕获「守护装上之前就已经续播完」的情况。10 秒后自行退出。
+    if (el._yktAnomalyTimer) clearInterval(el._yktAnomalyTimer);
+    let anomalyHits = 0;
+    el._yktAnomalyTimer = setInterval(() => {
+      if (!window._yktEngineActive || stopRequested) { clearInterval(el._yktAnomalyTimer); el._yktAnomalyTimer = null; return; }
+      const cur = document.querySelector('video');
+      if (!cur || cur.ended) { clearInterval(el._yktAnomalyTimer); el._yktAnomalyTimer = null; return; }
+      const elapsed = (Date.now() - startTs) / 1000;
+      if (elapsed > 10) { clearInterval(el._yktAnomalyTimer); el._yktAnomalyTimer = null; return; }
+      if (anomalyHits >= 3) { clearInterval(el._yktAnomalyTimer); el._yktAnomalyTimer = null; return; }
+      const at = cur.currentTime;
+      if (isGhostAdvance({ currentTime: at, elapsedSec: elapsed, rate: window._yktRate })) {
+        anomalyHits++;
+        panelLog(`↺ 检测到幽灵续播（${Math.round(at)}s，预期仅 ${Math.round(elapsed * window._yktRate)}s）→ 拉回开头（第 ${anomalyHits} 次）`);
+        try { cur.currentTime = 0; } catch (_) {}
+      }
+    }, 2000);
+
     try { el.muted = true; } catch (_) {}
     try { el.volume = window._yktVolume; } catch (_) {}
     try { el.playbackRate = window._yktRate; } catch (_) {}
@@ -590,14 +712,24 @@
 
   function startKeepAlive() {
     stopKeepAlive();
+    let guardStartTs = Date.now();
     keepAliveTimer = setInterval(() => {
       if (!window._yktEngineActive || stopRequested) return;
       const el = document.querySelector('video');
       if (!el) return;
-      if (el !== video) { panelLog('↻ 检测到新的 video 元素，重新绑定'); video = el; video._scriptAllowPause = false; engagePlayback(el); return; }
+      if (el !== video) { panelLog('↻ 检测到新的 video 元素，重新绑定'); video = el; video._scriptAllowPause = false; engagePlayback(el); guardStartTs = Date.now(); return; }
       if (el.paused && !el.ended) el.play().catch(() => {});
       if (el.playbackRate !== window._yktRate) el.playbackRate = window._yktRate;
       if (el.volume !== window._yktVolume) el.volume = window._yktVolume;
+      // 已经真从开头播到 5s → 说明续播跳转过不了，关闭寻址守护（最多守 30s）
+      if (window._yktStartGuard && (el.currentTime > 5 || Date.now() - guardStartTs > 30000)) {
+        const played = el.currentTime > 5;
+        window._yktStartGuard = false;
+        if (played) {
+          window._yktPlayedFromStart = true;
+          panelLog(`✔ 已从开头正常播放（当前 ${Math.round(el.currentTime)}s）`);
+        }
+      }
     }, 1000);
   }
   function stopKeepAlive() { if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; } }
@@ -804,11 +936,20 @@
       return await goNext(ctx, 'already-done');
     }
 
-    const found = await findVideo(20);
-    if (!found) {
+    const found = await findVideo();
+    if (!found.video) {
+      // 元素在、但 metadata 迟迟没到：这不是「非视频页」，不该跳掉视频，
+      // 而是重载一次重新初始化（新章节首个视频可能踩到）
+      if (found.sawElement) {
+        const n = bumpAttempts(ctx.leafId);
+        panelLog(`⚠ video 元素存在但 150s 内仍未就绪（第 ${n} 次）`);
+        if (n <= 2) { ssSet('_ykt_reload_check', '1'); location.reload(); return 'reload'; }
+        panelLog('⚠ 重载多次仍未就绪，跳过该视频（未计入“无视频”统计）');
+        return await goNext(ctx, 'no-video');
+      }
       const n = (parseInt(ssGet('_ykt_novideo_count') || '0', 10) || 0) + 1;
       ssSet('_ykt_novideo_count', String(n));
-      panelLog(`⚠ 20s 未找到可播放 video（连续第 ${n} 次）`);
+      panelLog(`⚠ ${20}s 内页面无 video 元素（连续第 ${n} 次）`);
       if (n >= 3) {
         ssDel('_ykt_novideo_count');
         panelLog('❌ 连续多次找不到视频，停止（请检查网络或页面是否正常）');
@@ -820,7 +961,7 @@
     }
     ssDel('_ykt_novideo_count');
 
-    engagePlayback(found);
+    engagePlayback(found.video);
     startKeepAlive();
     startHealthWatch();
     monitorProgress();
@@ -959,6 +1100,8 @@
       getVideoStatus,
       formatDiagnosticsText,
       shouldDropRate,
+      shouldRewindSeek,
+      isGhostAdvance,
       RATE_LADDER,
     },
   };
@@ -1037,6 +1180,8 @@
         healthRunning: healthTimer !== null,
         stopRequested,
         sessionRunning,
+        startGuard: !!window._yktStartGuard,
+        playedFromStart: !!window._yktPlayedFromStart,
         health: { stall: health.stall, reloads: health.reloads, rateIdx: health.rateIdx, targetRate: window._yktRate, lastMeasuredSpeed: health.lastSpeed },
         panelLogLines: panelLogLines.slice(-50),
         sessionFlags: (() => {
