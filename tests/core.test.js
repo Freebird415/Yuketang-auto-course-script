@@ -169,13 +169,40 @@ describe('pickNextVideo()', () => {
     const r = pure.pickNextVideo([v('1'), v('2'), v('3')], '1');
     expect(r.next.leafId).toBe('2');
     expect(r.currentStillTodo).toBe(true);
-    expect(r.total).toEqual({ all: 3, video: 3 });
+    expect(r.total).toEqual({ all: 3, video: 3, skipped: 0 });
+  });
+
+  it('从中间开始时回跳到最上面的未完成视频（补齐功能的基础）', () => {
+    const list = [v('1'), v('2'), v('3'), v('4'), v('5')];
+    // 用户是从第 4 个开始刷的，前面 1~3 都还没完成
+    const r = pure.pickNextVideo(list, '4');
+    expect(r.next.leafId).toBe('1');
+  });
+
+  it('skipIds 里的异常视频不参与选择，也不计入可刷数', () => {
+    const list = [v('1'), v('2'), v('3')];
+    const r = pure.pickNextVideo(list, '3', ['1', '2']);
+    expect(r.next).toBeNull();
+    expect(r.total).toEqual({ all: 3, video: 1, skipped: 2 });
+  });
+
+  it('跳过名单不影响其它视频的选取顺序', () => {
+    const list = [v('1'), v('2'), v('3'), v('4')];
+    const r = pure.pickNextVideo(list, '4', ['2']);
+    expect(r.next.leafId).toBe('1');
+    expect(r.total.skipped).toBe(1);
+  });
+
+  it('数字/字符串形式的 skipId 都能匹配', () => {
+    const list = [{ leafId: '1', type: 0 }, { leafId: '2', type: 0 }];
+    expect(pure.pickNextVideo(list, null, [1]).next.leafId).toBe('2');
+    expect(pure.pickNextVideo(list, null, ['1']).next.leafId).toBe('2');
   });
 
   it('跳过讨论/作业，只挑 type=0', () => {
     const r = pure.pickNextVideo([v('1'), forum('2'), quiz('3'), v('4')], '1');
     expect(r.next.leafId).toBe('4');
-    expect(r.total).toEqual({ all: 4, video: 2 });
+    expect(r.total).toEqual({ all: 4, video: 2, skipped: 0 });
   });
 
   it('当前视频仍在清单里 → currentStillTodo=true（服务端未确认完成）', () => {
@@ -204,7 +231,7 @@ describe('pickNextVideo()', () => {
   it('清单为空 → next 为 null', () => {
     const r = pure.pickNextVideo([], '1');
     expect(r.next).toBeNull();
-    expect(r.total).toEqual({ all: 0, video: 0 });
+    expect(r.total).toEqual({ all: 0, video: 0, skipped: 0 });
   });
 
   it('非数组入参不抛错', () => {

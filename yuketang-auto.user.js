@@ -369,22 +369,56 @@
    * @param {Array<{leafId:string,type:number}>} list
    * @param {string|number|null} currentLeafId 当前所在 leaf
    */
-  function pickNextVideo(list, currentLeafId) {
+  function pickNextVideo(list, currentLeafId, skipIds) {
     const arr = Array.isArray(list) ? list : [];
+    const skip = new Set((skipIds || []).map(String));
     const videos = arr.filter(i => i.type === 0);
+    const playable = videos.filter(v => !skip.has(v.leafId));
     const cur = currentLeafId === null || currentLeafId === undefined ? null : String(currentLeafId);
     const currentStillTodo = !!cur && videos.some(v => v.leafId === cur);
-    const next = videos.find(v => v.leafId !== cur) || null;
-    return { next, currentStillTodo, total: { all: arr.length, video: videos.length } };
+    // 清单本身按课程顺序，所以这里取到的就是「最上面那个未完成」——
+    // 从中间开始刷时它会自然回跳到前面去补齐；skipIds 里的（异常视频）则不参与。
+    const next = playable.find(v => v.leafId !== cur) || null;
+    return {
+      next,
+      currentStillTodo,
+      total: { all: arr.length, video: playable.length, skipped: videos.length - playable.length },
+    };
+  }
+
+  // ===================================================================
+  //  异常视频「跳过名单」
+  //  页面显示已完成、但服务端（todo_list）仍列为未完成 → 重播 2 次仍不确认，
+  //  就把它记入名单：本轮不再碰它，最后统一在日志里列出来让用户手动处理。
+  // ===================================================================
+  const SKIP_KEY = '_ykt_skipped';
+  function getSkipped() {
+    try { const v = JSON.parse(ssGet(SKIP_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch (_) { return []; }
+  }
+  function addSkipped(leafId, name, reason) {
+    const list = getSkipped();
+    if (!list.some(s => s.leafId === String(leafId))) {
+      list.push({ leafId: String(leafId), name: name || '', reason: reason || '', t: Date.now() });
+      ssSet(SKIP_KEY, JSON.stringify(list));
+    }
+    return getSkipped();
+  }
+  function clearSkipped() { ssDel(SKIP_KEY); }
+  function skippedIds() { return getSkipped().map(s => s.leafId); }
+
+  /** 当前 leaf 在左侧目录里的序号（目录即课程顺序），取不到返回 -1 */
+  function getActiveLeafOutlineIndex() {
+    const items = Array.from(document.querySelectorAll('.leaf-item'));
+    return items.findIndex(i => i.classList.contains('is-active'));
   }
 
   /**
    * 决定「下一个该刷的视频」。
-   * @returns {{next: Object|null, currentStillTodo: boolean, total: {all:number, video:number}}}
+   * @returns {{next: Object|null, currentStillTodo: boolean, total: {all:number, video:number, skipped:number}}}
    */
   async function planNextTask(ctx) {
     const list = await apiGetTodoList(ctx.classroomId);
-    return pickNextVideo(list, ctx.leafId);
+    return pickNextVideo(list, ctx.leafId, skippedIds());
   }
 
   // ===================================================================
@@ -550,6 +584,8 @@
         updatePanelStatus('已停止', '#ff4d4f');
       } else {
         panelLog('手动开始');
+        clearSkipped();
+        ssDel('_ykt_last_idx');
         activateEngine();
         this.textContent = '⏹ 停止刷课';
         this.style.background = '#ff4d4f';
@@ -863,9 +899,27 @@
   function bumpAttempts(leafId) { const n = getAttempts(leafId) + 1; ssSet(attemptsKey(leafId), String(n)); return n; }
   function clearAttempts(leafId) { ssDel(attemptsKey(leafId)); }
 
+  /** 把「待手动处理」清单打到面板日志（刷完时自动调，也可随时手动查看） */
+  function logSkipReport() {
+    const skipped = getSkipped();
+    if (!skipped.length) {
+      panelLog('✅ 没有需要手动处理的视频');
+      return 0;
+    }
+    panelLog('━━━━━━━━ 需要你手动处理的视频 ━━━━━━━━');
+    panelLog(`⚠ 共 ${skipped.length} 个：页面显示已完成，但服务端一直未确认，已跳过`);
+    skipped.forEach((s, i) => {
+      panelLog(`   ${i + 1}. leaf=${s.leafId}${s.name ? '「' + s.name + '」' : ''}`);
+    });
+    panelLog('   请在课程「未完成」列表里按标题找到它们，手动播一遍');
+    panelLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    return skipped.length;
+  }
+
   async function finishAll() {
-    panelLog('🎉 所有视频已完成！');
-    updatePanelStatus('全部完成 🎉', '#1677ff');
+    panelLog('🎉 所有可自动完成的视频已完成！');
+    const n = logSkipReport();
+    updatePanelStatus(n ? `${n} 个待手动处理` : '全部完成 🎉', n ? '#faad14' : '#1677ff');
     deactivateEngine();
     stopAll();
     const btn = document.getElementById('ykt-btn-toggle');
@@ -876,36 +930,49 @@
    * 结束当前视频，前往下一个未完成视频。
    * 优先用 todo_list 接口（能自动跳过讨论/作业），接口失败则退回点「下一节」箭头。
    */
+  /** 查一次未完成清单并打日志（失败返回 null） */
+  async function tryPlan(ctx) {
+    try {
+      const plan = await planNextTask(ctx);
+      panelLog(`📋 未完成：可刷视频 ${plan.total.video}` +
+        (plan.total.skipped ? ` / 已跳过 ${plan.total.skipped}` : '') +
+        ` / 清单共 ${plan.total.all}` +
+        (plan.currentStillTodo ? '（当前视频服务端尚未确认完成）' : ''));
+      return plan;
+    } catch (e) {
+      panelLog('⚠ 接口查询失败: ' + e.message);
+      return null;
+    }
+  }
+
   async function goNext(ctx, reason) {
     if (stopRequested) return 'stopped';
     const curLeaf = ctx && ctx.leafId ? String(ctx.leafId) : null;
     if (curLeaf && reason !== 'already-done') clearAttempts(curLeaf);
 
-    let plan = null;
-    try {
-      plan = await planNextTask(ctx);
-      panelLog(`📋 未完成：视频 ${plan.total.video} / 全部 ${plan.total.all}` +
-        (plan.currentStillTodo ? '（当前视频服务端尚未确认完成）' : ''));
-    } catch (e) {
-      panelLog('⚠ 接口查询失败: ' + e.message);
+    let plan = await tryPlan(ctx);
+
+    // 页面说已完成、接口说未完成 → 先重播；重播用尽则记入跳过名单并重新规划
+    if (plan && plan.currentStillTodo && curLeaf) {
+      const n = bumpAttempts(curLeaf);
+      if (n <= 2 && reason !== 'no-video') {
+        panelLog(`⚠ 服务端未确认完成，重播一次（第 ${n} 次）`);
+        ssSet('_ykt_reload_check', '1');
+        location.reload();
+        return 'reload';
+      }
+      const title = getActiveLeafTitle();
+      const list = addSkipped(curLeaf, title, '页面显示已完成但服务端未确认');
+      panelLog(`⚠ 放弃该视频，记入待手动处理名单（共 ${list.length} 个）：leaf=${curLeaf}${title ? '「' + title + '」' : ''}`);
+      plan = await tryPlan(ctx);
     }
 
     if (plan) {
       if (plan.next) {
-        if (plan.currentStillTodo && curLeaf) {
-          const n = bumpAttempts(curLeaf);
-          if (n <= 2 && reason !== 'no-video') {
-            panelLog(`⚠ 服务端未确认完成，重播一次（第 ${n} 次）`);
-            ssSet('_ykt_reload_check', '1');
-            location.reload();
-            return 'reload';
-          }
-          panelLog('⚠ 跳过未确认完成的视频，继续下一个');
-        }
         gotoUrl(buildVideoUrl(ctx, plan.next.leafId));
         return 'continue';
       }
-      // 没有 type=0 的未完成项了
+      // 没有可刷的未完成项了
       await finishAll();
       return 'done';
     }
@@ -960,6 +1027,16 @@
       return await goNext(ctx, 'no-video');
     }
     ssDel('_ykt_novideo_count');
+
+    // 记录在目录中的位置，识别「回跳补齐」（目录即课程顺序）
+    const outlineIdx = getActiveLeafOutlineIndex();
+    if (outlineIdx >= 0) {
+      const prevIdx = parseInt(ssGet('_ykt_last_idx') || '-1', 10);
+      if (prevIdx >= 0 && outlineIdx < prevIdx) {
+        panelLog(`↩ 回跳补齐：目录第 ${prevIdx + 1} 个 → 第 ${outlineIdx + 1} 个（把前面漏掉的补上）`);
+      }
+      ssSet('_ykt_last_idx', String(outlineIdx));
+    }
 
     engagePlayback(found.video);
     startKeepAlive();
@@ -1090,6 +1167,9 @@
     context: () => parsePageContext(location.pathname),
     status: () => getVideoStatus(),
     plan: async () => planNextTask(parsePageContext(location.pathname)),
+    skipped: () => getSkipped(),
+    report: () => logSkipReport(),
+    outlineIndex: () => getActiveLeafOutlineIndex(),
     /** 纯函数导出（供单元测试直接测出货代码，避免 core.js 镜像漂移） */
     pure: {
       parsePageContext,
