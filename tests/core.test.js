@@ -44,8 +44,8 @@ describe('脚本入口', () => {
     expect(typeof ykt.plan).toBe('function');
   });
 
-  it('版本号与 @version 一致', () => {
-    const m = SCRIPT_SRC.match(/@version\s+([\d.]+)/);
+  it('版本号与 @version 一致（含 -beta.N 预发布后缀）', () => {
+    const m = SCRIPT_SRC.match(/@version\s+(\S+)/);
     expect(m).not.toBeNull();
     expect(ykt.version).toBe(m[1]);
   });

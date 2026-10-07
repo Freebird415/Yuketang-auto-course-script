@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂连播助手
 // @namespace    https://greasyfork.org/users/1616996-acac1a
-// @version      2.3.0
+// @version      2.0.1-beta.4
 // @description  雨课堂自动静音二倍速刷课：进入视频页点「开始刷课」后自动播放、静音、2 倍速、自动连播，播完自动跳下一个未完成视频。适配 2026 新版「学习空间」（/ai-workspace/lms-graph），兼容旧版 /pro/lms 与长江雨课堂。内嵌 always-on-focus 可后台挂机，支持一键 BUG 上报。
 // @author       Acac1a
 // @match        *://*.yuketang.cn/*
@@ -15,7 +15,7 @@
 (() => {
   'use strict';
 
-  const SCRIPT_VERSION = '2.3.0';
+  const SCRIPT_VERSION = '2.0.1-beta.4';
   const IS_YUKETANG = /(^|\.)yuketang\.cn$/.test(location.hostname);
 
   // ===================================================================
