@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂连播助手
 // @namespace    https://greasyfork.org/users/1616996-acac1a
-// @version      2.0.1
+// @version      2.1.0
 // @description  雨课堂自动静音二倍速刷课：进入视频页点「开始刷课」后自动播放、静音、2 倍速、自动连播，播完自动跳下一个未完成视频。适配 2026 新版「学习空间」（/ai-workspace/lms-graph），兼容旧版 /pro/lms 与长江雨课堂。内嵌 always-on-focus 可后台挂机，支持一键 BUG 上报。
 // @author       Acac1a
 // @match        *://*.yuketang.cn/*
@@ -15,7 +15,7 @@
 (() => {
   'use strict';
 
-  const SCRIPT_VERSION = '2.0.1';
+  const SCRIPT_VERSION = '2.1.0';
   const IS_YUKETANG = /(^|\.)yuketang\.cn$/.test(location.hostname);
 
   // ===================================================================
@@ -54,14 +54,37 @@
   })();
 
   // ===================================================================
+  //  模块 0.5：倍速策略
+  //
+  //  雨课堂播放器 UI 最高只给 2x，服务端也不校验倍速（心跳里的 sp 恒为 1，
+  //  rate 字段只记录完成比例）。真正的上限来自分片取流——实测：
+  //      2x  有效速度 1.99x，0 卡顿
+  //      3x  有效速度 3.00x，0 卡顿   ← 稳定
+  //      4x  有效速度 1.63x，22 卡顿
+  //      5x  有效速度 0.01x，37 卡顿  ← 崩掉
+  //  所以默认 3x，并在实测跟不上时自动降档（而不是死守一个固定值）。
+  // ===================================================================
+  const RATE_LADDER = [3, 2.5, 2];
+
+  /**
+   * 是否应该降档（纯函数，便于单测）。
+   * 依据：一个评估窗口内卡顿过多，或实测有效速度明显低于目标。
+   */
+  function shouldDropRate({ measuredSpeed, target, stalls, strikes, maxStrikes = 2 }) {
+    if (stalls >= 3) return true;
+    if (!(measuredSpeed > 0)) return false;
+    return measuredSpeed < target * 0.75 && strikes >= maxStrikes;
+  }
+
+  // ===================================================================
   //  模块 1：条件性原型链拦截（仅在引擎激活时生效）
-  //  任何后来创建的 <video> 都会被自动施加 2x / 静音 / 防暂停
+  //  任何后来创建的 <video> 都会被自动施加目标倍速 / 静音 / 防暂停
   // ===================================================================
   (function conditionalHack() {
     if (!IS_YUKETANG) return;
     try {
       window._yktEngineActive = false;
-      window._yktRate = 2;
+      window._yktRate = RATE_LADDER[0];
       window._yktVolume = 0;
 
       const rateDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
@@ -579,19 +602,48 @@
   }
   function stopKeepAlive() { if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; } }
 
-  /** 播放健康守护：stalled / 元素重建 / 长时间不推进 */
-  const health = { lastCt: -1, stall: 0, reloads: 0 };
+  /** 播放健康守护：stalled / 元素重建 / 长时间不推进 / 倍速自适应降档 */
+  const health = {
+    lastCt: -1, stall: 0, reloads: 0, totalStalls: 0,
+    rateIdx: 0, winCt: -1, winT: 0, winStall: 0, strikes: 0, lastSpeed: 0,
+  };
+  const RATE_WINDOW_MS = 5000;
   function startHealthWatch() {
     stopHealthWatch();
-    health.lastCt = -1; health.stall = 0;
+    health.lastCt = -1; health.stall = 0; health.totalStalls = 0;
+    health.rateIdx = 0; window._yktRate = RATE_LADDER[0];
+    health.winCt = -1; health.winT = 0; health.winStall = 0; health.strikes = 0; health.lastSpeed = 0;
     health.reloads = parseInt(ssGet('_ykt_health_reloads') || '0', 10) || 0;
     healthTimer = setInterval(() => {
       if (!window._yktEngineActive || stopRequested) return;
       const el = document.querySelector('video');
       if (!el || el.ended) return;
       const cur = el.currentTime;
+
+      // ── 倍速自适应：每 5 秒评估一次实测有效速度 + 卡顿情况 ──
+      const now = Date.now();
+      if (health.winCt < 0) { health.winCt = cur; health.winT = now; health.winStall = health.totalStalls; }
+      else if (now - health.winT >= RATE_WINDOW_MS) {
+        const dt = (now - health.winT) / 1000;
+        const speed = dt > 0 ? (cur - health.winCt) / dt : 0;
+        const stallsInWin = health.totalStalls - health.winStall;
+        const target = window._yktRate;
+        health.lastSpeed = +speed.toFixed(2);
+        if (speed > 0 && speed < target * 0.75) health.strikes++; else health.strikes = 0;
+        if (shouldDropRate({ measuredSpeed: speed, target, stalls: stallsInWin, strikes: health.strikes })
+            && health.rateIdx < RATE_LADDER.length - 1) {
+          health.rateIdx++;
+          window._yktRate = RATE_LADDER[health.rateIdx];
+          panelLog(`⚙ 实测仅 ${speed.toFixed(2)}x（目标 ${target}x，卡顿 ${stallsInWin} 次）→ 降档至 ${window._yktRate}x`);
+          try { el.playbackRate = window._yktRate; } catch (_) {}
+          health.strikes = 0;
+        }
+        health.winCt = cur; health.winT = now; health.winStall = health.totalStalls;
+      }
+
       if (cur === health.lastCt && el.readyState >= 3) {
         health.stall++;
+        health.totalStalls++;
         if (health.stall === 8) {
           panelLog('⚠ 播放停滞，尝试恢复');
           const bb = document.querySelector('xt-bigbutton');
@@ -906,6 +958,8 @@
       buildApiHeaders,
       getVideoStatus,
       formatDiagnosticsText,
+      shouldDropRate,
+      RATE_LADDER,
     },
   };
 
@@ -983,7 +1037,7 @@
         healthRunning: healthTimer !== null,
         stopRequested,
         sessionRunning,
-        health: { stall: health.stall, reloads: health.reloads },
+        health: { stall: health.stall, reloads: health.reloads, rateIdx: health.rateIdx, targetRate: window._yktRate, lastMeasuredSpeed: health.lastSpeed },
         panelLogLines: panelLogLines.slice(-50),
         sessionFlags: (() => {
           try {

@@ -401,6 +401,48 @@ describe('formatDiagnosticsText()', () => {
   });
 });
 
+// ==================== 倍速策略 ====================
+describe('RATE_LADDER / shouldDropRate()', () => {
+  it('阶梯从高到低且单调递减', () => {
+    const ladder = pure.RATE_LADDER;
+    expect(ladder.length).toBeGreaterThanOrEqual(2);
+    expect(ladder[0]).toBeGreaterThan(ladder[1]);
+    for (let i = 1; i < ladder.length; i++) expect(ladder[i]).toBeLessThan(ladder[i - 1]);
+  });
+
+  it('未突破 2x（保持雨课堂已验证的安全上限）', () => {
+    expect(pure.RATE_LADDER[0]).toBeGreaterThanOrEqual(2);
+    expect(pure.RATE_LADDER[pure.RATE_LADDER.length - 1]).toBe(2);
+  });
+
+  it('实测速度达标 → 不降档', () => {
+    expect(pure.shouldDropRate({ measuredSpeed: 3.0, target: 3, stalls: 0, strikes: 0 })).toBe(false);
+    expect(pure.shouldDropRate({ measuredSpeed: 2.5, target: 3, stalls: 0, strikes: 1 })).toBe(false);
+  });
+
+  it('窗口内卡顿 ≥3 次 → 直接降档', () => {
+    expect(pure.shouldDropRate({ measuredSpeed: 3.0, target: 3, stalls: 3, strikes: 0 })).toBe(true);
+  });
+
+  it('速度明显偏低且连续两窗口 → 降档', () => {
+    expect(pure.shouldDropRate({ measuredSpeed: 1.6, target: 3, stalls: 0, strikes: 2 })).toBe(true);
+  });
+
+  it('速度偏低但只出现一个窗口 → 再观察一轮', () => {
+    expect(pure.shouldDropRate({ measuredSpeed: 1.6, target: 3, stalls: 0, strikes: 1 })).toBe(false);
+  });
+
+  it('速度为 0（暂停/未开播）不触发降档', () => {
+    expect(pure.shouldDropRate({ measuredSpeed: 0, target: 3, stalls: 0, strikes: 5 })).toBe(false);
+    expect(pure.shouldDropRate({ measuredSpeed: -1, target: 3, stalls: 0, strikes: 5 })).toBe(false);
+    expect(pure.shouldDropRate({ measuredSpeed: NaN, target: 3, stalls: 0, strikes: 5 })).toBe(false);
+  });
+
+  it('恰好落在 75% 阈值上不降档', () => {
+    expect(pure.shouldDropRate({ measuredSpeed: 2.25, target: 3, stalls: 0, strikes: 9 })).toBe(false);
+  });
+});
+
 // ==================== 上下文与真实 URL 回归 ====================
 describe('真实 URL 回归', () => {
   const cases = [
