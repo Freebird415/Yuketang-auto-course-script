@@ -1,7 +1,7 @@
 {
   "name": "yuketang-auto-course-script",
   "private": true,
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "雨课堂连播助手（油猴脚本）— 静音二倍速 + 自动连播",
   "type": "module",
   "scripts": {
