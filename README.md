@@ -1,79 +1,135 @@
 # 雨课堂连播助手
 
-一个油猴（Tampermonkey）脚本，自动以 **2 倍速 + 静音 + 防暂停 + 自动连播** 的方式刷完雨课堂视频，支持后台挂机（always-on-focus）。内置**一键 BUG 上报**，小白用户无需打开控制台即可反馈问题。
+一个油猴脚本（Tampermonkey / Violentmonkey）。在雨课堂视频页点一次「开始刷课」，
+即以 2 倍速静音播放，播完后自动跳转课程中的下一个未完成视频，直至该课程视频全部完成。
+支持后台挂机，附带状态面板与一键 BUG 上报。
 
-## 支持平台
+> 本脚本仅供学习浏览器自动化技术使用。使用本脚本产生的一切后果由使用者自行承担。
 
-| 平台 | 域名 | 状态 |
-|---|---|---|
-| 华工雨课堂 | `scut.yuketang.cn` | ✅ 稳定 |
-| 长江雨课堂 | `changjiang.yuketang.cn` | 🚧 适配中（v1.4 起，实战验证进行中） |
+## 版本说明
 
-## 功能特性
+2026 年雨课堂更换了课程播放页（`/pro/lms/...` 改为 `/ai-workspace/lms-graph/...`）。
+v2.0 是针对新版的重写：
 
-- 🎬 **自动播放**：视频页点「开始」即可，2 倍速 + 静音 + 防暂停
-- 🔁 **自动连播**：播完一节自动跳下一节，跨页面全量加载避免状态泄漏
-- 👁️ **后台挂机**：always-on-focus 覆写 visibility 检测，切后台/最小化不暂停
-- ⏭️ **非视频页面跳过**：自动识别作业/讨论等非视频节点并跳过
-- 💪 **播放健康守护**（长江）：分段视频切段重建 `<video>` 时自动重绑、停滞恢复
-- 🛡️ **防续播守护**（长江）：断区重播时检测播放位置异常跳跃并重置
-- 🐛 **一键 BUG 上报**：点面板按钮 → 输入现象 → 自动采集诊断数据发送到飞书群
-- 🔒 **隐私保护**：不采集 Cookie、姓名、学号、视频标题
+- 弃用「读取 Vue 实例拿下一节 ID」（`__vue__` / `nextLeaf.id`）的做法。新版为生产构建的
+  Vue 3，不暴露任何组件实例，该路径已不可用
+- 弃用成绩单页的 DOM 爬取，改为直接调用课程接口
+- 保留原型链拦截（倍速 / 静音 / 防暂停）、整页跳转、后台挂机与 BUG 上报
+
+实现细节见 [docs/脚本逻辑.md](docs/脚本逻辑.md)，开发历程与已排除的方案见
+[docs/开发方向及试错.md](docs/开发方向及试错.md)。
+
+## 适配范围
+
+| 站点 / 页面 | 状态 |
+| --- | --- |
+| `scut.yuketang.cn` 新版学习空间 `/ai-workspace/lms-graph/{classroomId}/video/{leafId}` | 已实测 |
+| 其他 `*.yuketang.cn` 新版学习空间 | 同一套代码，未逐一实测 |
+| 旧版 `/pro/lms/{sign}/{classroomId}/video/{leafId}` | 保留兼容分支 |
+| `changjiang.yuketang.cn` `/v2/web/xcloud/video-student/{courseId}/{leafId}` | 保留兼容分支 |
+
+## 功能
+
+- **2 倍速**：拦截 `HTMLMediaElement.prototype.playbackRate` 的 setter，页面后续创建的
+  `<video>` 元素均自动生效
+- **静音**：同理拦截 `volume` 的 setter，并将 `muted` 置为 `true`
+- **防暂停**：拦截 `pause()`，另加 1 秒定时守护
+- **自动连播**：调用课程接口获取未完成清单，播完后跳转下一个视频；清单中的讨论、作业节点自动跳过
+- **后台挂机**：覆写 `visibilityState` 与 `hasFocus`，切换标签页或最小化不中断播放
+- **播放健康守护**：视频分段切换导致 `<video>` 元素重建时自动重绑；长时间停滞自动尝试恢复，
+  卡死则刷新重试（有次数上限）
+- **状态面板**：右下角浮窗，含开始 / 停止、实时日志、日志复制
+- **BUG 上报**：自动采集页面结构、媒体事件时间线与运行日志发送至飞书群，无需打开控制台
 
 ## 安装
 
-1. 安装浏览器扩展 **Tampermonkey**（[Chrome 商店](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) / [Edge 商店](https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepiloendndfphd)）
-2. 点击本仓库的 `yuketang-auto.user.js` → 右上角「Raw」→ Tampermonkey 会自动弹出安装页 → 点「安装」
-   - 或复制脚本内容，在 Tampermonkey 面板中「新建脚本」粘贴保存
-3. 打开雨课堂视频页，右下角出现「🎓 雨课堂连播助手」面板即安装成功
+1. 安装浏览器扩展 Tampermonkey（[Chrome 商店](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) /
+   [Edge 商店](https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepiloendndfphd)）
+2. 打开本仓库的 [yuketang-auto.user.js](yuketang-auto.user.js)，点击右上角「Raw」，
+   Tampermonkey 会弹出安装页，点「安装」
+3. 打开雨课堂视频页，右下角出现面板即安装成功
 
 ## 使用
 
-1. 进入任意视频播放页
-2. 点击面板上的 **「🚀 开始刷课」**
-3. 脚本会自动 2 倍速静音播放，并在播完后自动跳转下一节
-4. 点击 **「⏹ 停止刷课」** 随时停止
+1. 打开课程，进入视频页，或课程的「未完成」列表页
+2. 点击面板上的「开始刷课」
+3. 保持页面打开即可。脚本会自动播完一个跳下一个，全部完成后自动停止并复位按钮
 
-> 切换页面时脚本会通过 `sessionStorage` 标记自动恢复连播，无需重复点击开始。
+点击「停止刷课」可随时中止，播放器行为立即恢复正常。
 
-## BUG 上报
+## 工作原理
 
-面板上的 **「BUG上报」** 按钮会把诊断信息发送到开发者维护的飞书群：
+```
+点击「开始刷课」
+  │
+  ├─ 激活引擎：window._yktEngineActive = true，原型链拦截生效
+  │
+  ├─ 调用课程接口获取未完成清单
+  │    GET /c27/online_courseware/course/classroom/{cid}/0/sku_list/       → sku_id
+  │    GET /c27/online_courseware/course/classroom/{cid}/{sku}/todo_list/  → 未完成节点列表
+  │    （所需头部 xtbz / university-id / platform-id / x-client / x-csrftoken 均读自 document.cookie）
+  │
+  ├─ 取清单中第一个 type === 0（视频）的节点，以 location.href 整页跳转
+  │
+  ├─ 页面重载后读取 localStorage 标记，自动恢复会话
+  │
+  ├─ 定位 <video>，静音、2 倍速、播放，等待 video.ended
+  │
+  ├─ 确认完成：读页面「已完成」标记；读不到时以接口二次确认
+  │    （雨课堂通过 POST /video-log/heartbeat/ 的 videoend 事件写入完成状态）
+  │
+  └─ 回到第三步，直到清单中不再有 type === 0 的节点
+```
 
-- 你只需描述「何时发生 / 做了什么操作 / 期望结果」，**无需在控制台执行任何命令**
-- 脚本自动采集页面结构、媒体事件史、运行日志等诊断数据（已脱敏）
-- 默认使用开发者内置的飞书 webhook；如需自建接收渠道，可修改脚本中 `FEISHU_WEBHOOK_URL` 常量
+跳转使用整页加载而非前端路由，以避免页面组件状态残留。
 
-## 隐私承诺
+关于倍速是否会被判定为作弊：实测不会。服务端统计的是视频时间轴上的播放量
+（记录为 `watch_length` 102.3 / `video_length` 101），与墙钟时间无关。
 
-脚本**不会**采集或上传以下内容：
+## 隐私
 
-- Cookie、完整 DOM、localStorage 全文
-- 学生姓名、学号
-- 视频标题列表
-- 任何可用于识别个人身份的信息
+脚本不采集、不上传以下内容：Cookie、完整 DOM、localStorage 全文、姓名、学号、视频标题。
 
-诊断数据仅包含页面结构摘要、播放器状态、媒体事件时间线等 debug 所需的技术信息。
+BUG 上报仅包含页面结构摘要、播放器状态、媒体事件时间线与运行日志，用于定位问题。
 
 ## 开发
 
-本项目将可测试的纯逻辑提取到 `lib/core.js`，用 Vitest 覆盖。
-
 ```bash
-npm install          # 安装依赖
-npx vitest run       # 跑全部单元测试（86 例）
-npx vitest run --coverage   # 生成覆盖率报告
+npm install
+npm test            # 单元测试（53 例）
+npm run coverage
 ```
 
-### 项目结构
+单元测试直接加载出货脚本本体（`import '../yuketang-auto.user.js'`），测试其导出的
+`window._ykt.pure` 纯函数，因此不存在「脚本与测试两份实现互相漂移」的问题。
+
+覆盖率统计对象同样是出货脚本本体，约 28% 语句 / 33% 行。其余部分为 DOM 交互、
+接口调用与面板 UI，jsdom 无法执行，只能在真实浏览器中验证。
+
+### 目录结构
 
 ```
-├── yuketang-auto.user.js   # 主脚本（油猴直接安装）
-├── lib/core.js             # 可测试纯函数模块
-├── tests/core.test.js      # 单元测试
-├── vitest.config.js        # Vitest 配置
-└── package.json
+yuketang-auto.user.js   主脚本，油猴直接安装（唯一真源）
+tests/core.test.js      单元测试
+vitest.config.mjs
+docs/
+  脚本逻辑.md             架构与实现细节
+  开发方向及试错.md        开发历程、踩坑与已排除的方案
 ```
+
+### 无油猴环境的调试方式
+
+在 Chrome DevTools 中直接执行出货脚本。需先起一个带 `Access-Control-Allow-Origin: *`
+的本地静态服务器：
+
+```js
+const r = await fetch('http://127.0.0.1:8124/yuketang-auto.user.js?t=' + Date.now());
+(0, eval)(await r.text());
+localStorage.setItem('_ykt_engine_active', '1');
+window._ykt.start();
+```
+
+可用 `window._ykt.pure` 直接调用纯函数做调试。
 
 ## License
 
