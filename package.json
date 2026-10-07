@@ -1,15 +1,17 @@
 {
-  "name": "yuketang-auto",
-  "version": "1.5.0",
-  "description": "雨课堂连播助手 — 油猴脚本，自动 2x 倍速静音连播（华工 + 长江雨课堂）",
+  "name": "yuketang-auto-course-script",
   "private": true,
+  "version": "2.0.0",
+  "description": "雨课堂连播助手（油猴脚本）— 静音二倍速 + 自动连播",
+  "type": "module",
   "scripts": {
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.9",
-    "jsdom": "^29.1.1",
-    "vitest": "^4.1.9"
+    "@vitest/coverage-v8": "^5.0.3",
+    "jsdom": "^30.1.2",
+    "vitest": "^5.0.3"
   }
 }

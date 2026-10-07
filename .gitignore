@@ -11,3 +11,7 @@ Thumbs.db
 
 # 本地环境变量（凭证）
 .env
+
+# 本地侦察产物 / 临时截图
+_recon/
+qr-login.png
